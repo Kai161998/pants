@@ -144,8 +144,10 @@ pub fn call_method(obj: &Key, method: &str, args: &[Value]) -> Result<Value, Fai
   }).into()
 }
 
-pub fn call(func: &Value, args: &[Value]) -> Result<Value, Failure> {
-  with_externs(|e| (e.call)(e.context, func, args.as_ptr(), args.len() as u64)).into()
+pub fn call(func: &Key, args: &[Value]) -> Result<Value, Failure> {
+  let interns = INTERNS.read().unwrap();
+  let func_val = interns.get(func);
+  with_externs(|e| (e.call)(e.context, func_val, args.as_ptr(), args.len() as u64)).into()
 }
 
 ///
@@ -220,9 +222,9 @@ where
   F: FnOnce(&Externs) -> T,
 {
   let externs_opt = EXTERNS.write().unwrap();
-  let externs = externs_opt.as_ref().unwrap_or_else(|| {
-    panic!("externs used before static initialization.")
-  });
+  let externs = externs_opt
+    .as_ref()
+    .unwrap_or_else(|| panic!("externs used before static initialization."));
   f(externs)
 }
 

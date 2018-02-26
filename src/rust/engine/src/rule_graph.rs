@@ -645,8 +645,8 @@ pub struct RuleGraph {
 }
 
 fn type_constraint_str(type_constraint: TypeConstraint) -> String {
-  let str_val = externs::call_method(&type_constraint.0, "graph_str", &[])
-    .expect("string from calling repr");
+  let str_val =
+    externs::call_method(&type_constraint.0, "graph_str", &[]).expect("string from calling repr");
   externs::val_to_str(&str_val)
 }
 

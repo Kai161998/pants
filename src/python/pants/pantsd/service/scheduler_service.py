@@ -55,9 +55,9 @@ class SchedulerService(PantsService):
   def _combined_invalidating_fileset_from_globs(glob_strs, root):
     return set.union(*(Fileset.globs(glob_str, root=root)() for glob_str in glob_strs))
 
-  def setup(self, lifecycle_lock, fork_lock):
+  def setup(self, lifecycle_lock):
     """Service setup."""
-    super(SchedulerService, self).setup(lifecycle_lock, fork_lock)
+    super(SchedulerService, self).setup(lifecycle_lock)
     # Register filesystem event handlers on an FSEventService instance.
     self._fs_event_service.register_all_files_handler(self._enqueue_fs_event)
 
@@ -88,8 +88,7 @@ class SchedulerService(PantsService):
     with self.lifecycle_lock:
       self._maybe_invalidate_scheduler(files)
 
-    with self.fork_lock:
-      self._scheduler.invalidate_files(files)
+    self._scheduler.invalidate_files(files)
 
   def _process_event_queue(self):
     """File event notification queue processor."""
@@ -137,9 +136,8 @@ class SchedulerService(PantsService):
       self._logger.debug('graph len was {}, waiting for initial watchman event'.format(graph_len))
       self._watchman_is_running.wait()
 
-    with self.fork_lock:
-      self._graph_helper.warm_product_graph(spec_roots)
-      return self._graph_helper
+    self._graph_helper.warm_product_graph(spec_roots)
+    return self._graph_helper
 
   def run(self):
     """Main service entrypoint."""
