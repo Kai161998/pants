@@ -18,6 +18,7 @@ import pkg_resources
 import six
 
 from pants.util.contextutil import temporary_dir
+from pants.engine.selectors import constraint_for, Get
 from pants.util.dirutil import safe_mkdir, safe_mkdtemp
 from pants.util.memo import memoized_property
 from pants.util.objects import datatype
@@ -84,6 +85,12 @@ typedef struct {
 } PyResult;
 
 typedef struct {
+  uint8_t         tag;
+  Value           value;
+  TypeConstraint  constraint;
+} PyGeneratorResponse;
+
+typedef struct {
   int64_t   hash_;
   Value     value;
   TypeId    type_id;
@@ -92,24 +99,25 @@ typedef struct {
 typedef void ExternContext;
 
 // On the rust side the integration is defined in externs.rs
-typedef void             (*extern_ptr_log)(ExternContext*, uint8_t, uint8_t*, uint64_t);
-typedef Ident            (*extern_ptr_identify)(ExternContext*, Value*);
-typedef _Bool            (*extern_ptr_equals)(ExternContext*, Value*, Value*);
-typedef Value            (*extern_ptr_clone_val)(ExternContext*, Value*);
-typedef void             (*extern_ptr_drop_handles)(ExternContext*, Handle*, uint64_t);
-typedef Buffer           (*extern_ptr_type_to_str)(ExternContext*, TypeId);
-typedef Buffer           (*extern_ptr_val_to_str)(ExternContext*, Value*);
-typedef _Bool            (*extern_ptr_satisfied_by)(ExternContext*, Value*, Value*);
-typedef _Bool            (*extern_ptr_satisfied_by_type)(ExternContext*, Value*, TypeId*);
-typedef Value            (*extern_ptr_store_list)(ExternContext*, Value**, uint64_t, _Bool);
-typedef Value            (*extern_ptr_store_bytes)(ExternContext*, uint8_t*, uint64_t);
-typedef Value            (*extern_ptr_store_i32)(ExternContext*, int32_t);
-typedef Value            (*extern_ptr_project)(ExternContext*, Value*, uint8_t*, uint64_t, TypeId*);
-typedef ValueBuffer      (*extern_ptr_project_multi)(ExternContext*, Value*, uint8_t*, uint64_t);
-typedef Value            (*extern_ptr_project_ignoring_type)(ExternContext*, Value*, uint8_t*, uint64_t);
-typedef Value            (*extern_ptr_create_exception)(ExternContext*, uint8_t*, uint64_t);
-typedef PyResult         (*extern_ptr_call)(ExternContext*, Value*, Value*, uint64_t);
-typedef PyResult         (*extern_ptr_eval)(ExternContext*, uint8_t*, uint64_t);
+typedef void                (*extern_ptr_log)(ExternContext*, uint8_t, uint8_t*, uint64_t);
+typedef Ident               (*extern_ptr_identify)(ExternContext*, Value*);
+typedef _Bool               (*extern_ptr_equals)(ExternContext*, Value*, Value*);
+typedef Value               (*extern_ptr_clone_val)(ExternContext*, Value*);
+typedef void                (*extern_ptr_drop_handles)(ExternContext*, Handle*, uint64_t);
+typedef Buffer              (*extern_ptr_type_to_str)(ExternContext*, TypeId);
+typedef Buffer              (*extern_ptr_val_to_str)(ExternContext*, Value*);
+typedef _Bool               (*extern_ptr_satisfied_by)(ExternContext*, Value*, Value*);
+typedef _Bool               (*extern_ptr_satisfied_by_type)(ExternContext*, Value*, TypeId*);
+typedef Value               (*extern_ptr_store_list)(ExternContext*, Value**, uint64_t, _Bool);
+typedef Value               (*extern_ptr_store_bytes)(ExternContext*, uint8_t*, uint64_t);
+typedef Value               (*extern_ptr_store_i32)(ExternContext*, int32_t);
+typedef Value               (*extern_ptr_project)(ExternContext*, Value*, uint8_t*, uint64_t, TypeId*);
+typedef ValueBuffer         (*extern_ptr_project_multi)(ExternContext*, Value*, uint8_t*, uint64_t);
+typedef Value               (*extern_ptr_project_ignoring_type)(ExternContext*, Value*, uint8_t*, uint64_t);
+typedef Value               (*extern_ptr_create_exception)(ExternContext*, uint8_t*, uint64_t);
+typedef PyResult            (*extern_ptr_call)(ExternContext*, Value*, Value*, uint64_t);
+typedef PyGeneratorResponse (*extern_ptr_generator_send)(ExternContext*, Value*, Value*);
+typedef PyResult            (*extern_ptr_eval)(ExternContext*, uint8_t*, uint64_t);
 
 typedef void Tasks;
 typedef void Scheduler;
@@ -134,6 +142,7 @@ CFFI_HEADERS = '''
 void externs_set(ExternContext*,
                  extern_ptr_log,
                  extern_ptr_call,
+                 extern_ptr_generator_send,
                  extern_ptr_eval,
                  extern_ptr_identify,
                  extern_ptr_equals,
@@ -188,6 +197,7 @@ Scheduler* scheduler_create(Tasks*,
                             TypeConstraint,
                             TypeConstraint,
                             TypeConstraint,
+                            TypeConstraint,
                             TypeId,
                             TypeId,
                             Buffer,
@@ -225,24 +235,25 @@ void garbage_collect_store(Scheduler*);
 
 CFFI_EXTERNS = '''
 extern "Python" {
-  void             extern_log(ExternContext*, uint8_t, uint8_t*, uint64_t);
-  PyResult         extern_call(ExternContext*, Value*, Value*, uint64_t);
-  PyResult         extern_eval(ExternContext*, uint8_t*, uint64_t);
-  Ident            extern_identify(ExternContext*, Value*);
-  _Bool            extern_equals(ExternContext*, Value*, Value*);
-  Value            extern_clone_val(ExternContext*, Value*);
-  void             extern_drop_handles(ExternContext*, Handle*, uint64_t);
-  Buffer           extern_type_to_str(ExternContext*, TypeId);
-  Buffer           extern_val_to_str(ExternContext*, Value*);
-  _Bool            extern_satisfied_by(ExternContext*, Value*, Value*);
-  _Bool            extern_satisfied_by_type(ExternContext*, Value*, TypeId*);
-  Value            extern_store_list(ExternContext*, Value**, uint64_t, _Bool);
-  Value            extern_store_bytes(ExternContext*, uint8_t*, uint64_t);
-  Value            extern_store_i32(ExternContext*, int32_t);
-  Value            extern_project(ExternContext*, Value*, uint8_t*, uint64_t, TypeId*);
-  Value            extern_project_ignoring_type(ExternContext*, Value*, uint8_t*, uint64_t);
-  ValueBuffer      extern_project_multi(ExternContext*, Value*, uint8_t*, uint64_t);
-  Value            extern_create_exception(ExternContext*, uint8_t*, uint64_t);
+  void                extern_log(ExternContext*, uint8_t, uint8_t*, uint64_t);
+  PyResult            extern_call(ExternContext*, Value*, Value*, uint64_t);
+  PyGeneratorResponse extern_generator_send(ExternContext*, Value*, Value*);
+  PyResult            extern_eval(ExternContext*, uint8_t*, uint64_t);
+  Ident               extern_identify(ExternContext*, Value*);
+  _Bool               extern_equals(ExternContext*, Value*, Value*);
+  Value               extern_clone_val(ExternContext*, Value*);
+  void                extern_drop_handles(ExternContext*, Handle*, uint64_t);
+  Buffer              extern_type_to_str(ExternContext*, TypeId);
+  Buffer              extern_val_to_str(ExternContext*, Value*);
+  _Bool               extern_satisfied_by(ExternContext*, Value*, Value*);
+  _Bool               extern_satisfied_by_type(ExternContext*, Value*, TypeId*);
+  Value               extern_store_list(ExternContext*, Value**, uint64_t, _Bool);
+  Value               extern_store_bytes(ExternContext*, uint8_t*, uint64_t);
+  Value               extern_store_i32(ExternContext*, int32_t);
+  Value               extern_project(ExternContext*, Value*, uint8_t*, uint64_t, TypeId*);
+  Value               extern_project_ignoring_type(ExternContext*, Value*, uint8_t*, uint64_t);
+  ValueBuffer         extern_project_multi(ExternContext*, Value*, uint8_t*, uint64_t);
+  Value               extern_create_exception(ExternContext*, uint8_t*, uint64_t);
 }
 '''
 
@@ -466,6 +477,29 @@ def _initialize_externs(ffi):
     return c.to_value(Exception(msg))
 
   @ffi.def_extern()
+  def extern_generator_send(context_handle, func, arg):
+    """Given a callable, call it."""
+    c = ffi.from_handle(context_handle)
+    constraint = c.null_constraint
+    try:
+      val = c.from_value(func).send(c.from_value(arg))
+      if isinstance(val, Get):
+        # Continue.
+        constraint = TypeConstraint(c.to_key(constraint_for(val.product)))
+        val = val.subject
+        tag = 2
+      else:
+        # Break.
+        tag = 0
+    except Exception as e:
+      # Throw.
+      val = e
+      val._formatted_exc = traceback.format_exc()
+      tag = 1
+
+    return (tag, c.to_value(val), constraint)
+
+  @ffi.def_extern()
   def extern_call(context_handle, func, args_ptr, args_len):
     """Given a callable, call it."""
     c = ffi.from_handle(context_handle)
@@ -547,6 +581,10 @@ class ExternContext(object):
   def type_ids_buf(self, types):
     buf = self._ffi.new('TypeId[]', types)
     return (buf, len(types), self.to_value(buf))
+
+  @memoized_property
+  def null_constraint(self):
+    return TypeConstraint(self.to_key(None))
 
   def to_value(self, obj):
     handle = self._ffi.new_handle(obj)
@@ -637,6 +675,7 @@ class Native(object):
       self.lib.externs_set(context._handle,
                            self.ffi_lib.extern_log,
                            self.ffi_lib.extern_call,
+                           self.ffi_lib.extern_generator_send,
                            self.ffi_lib.extern_eval,
                            self.ffi_lib.extern_identify,
                            self.ffi_lib.extern_equals,
@@ -710,7 +749,8 @@ class Native(object):
                     constraint_file,
                     constraint_link,
                     constraint_process_request,
-                    constraint_process_result):
+                    constraint_process_result,
+                    constraint_generator):
     """Create and return an ExternContext and native Scheduler."""
 
     def func(constraint):
@@ -743,6 +783,7 @@ class Native(object):
         tc(constraint_link),
         tc(constraint_process_request),
         tc(constraint_process_result),
+        tc(constraint_generator),
         # Types.
         TypeId(self.context.to_id(six.text_type)),
         TypeId(self.context.to_id(six.binary_type)),

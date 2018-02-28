@@ -679,13 +679,13 @@ impl SelectTransitive {
                 }
 
                 if expansion.todo.is_empty() {
-                  future::Loop::Break(expansion)
+                  future::Loop::Break(expansion.outputs)
                 } else {
                   future::Loop::Continue(expansion)
                 }
               })
-            }).map(|expansion| {
-              externs::store_list(expansion.outputs.values().collect::<Vec<_>>(), false)
+            }).map(|expansion_outputs| {
+              externs::store_list(expansion_outputs.values().collect::<Vec<_>>(), false)
             })
               .to_boxed()
           }
@@ -1101,6 +1101,48 @@ impl Task {
       }
     }
   }
+
+  ///
+  /// Given a python generator Value, loop to request the generator's dependencies until
+  /// it completes with a result Value.
+  ///
+  /// TODO: Lots of cleanup needed, but most obviously needs to support multiple simple
+  /// selections at once.
+  ///
+  fn generate(context: Context, generator: Value) -> NodeFuture<Value> {
+    future::loop_fn(externs::eval("None").unwrap(), move |input| {
+      let context = context.clone();
+      future::result(externs::generator_send(&generator, &input))
+        .and_then(move |response| match response {
+          externs::GeneratorResponse::Continue(constraint, subject_val) => {
+            let subject = externs::key_for(subject_val);
+            let selector = selectors::Select::without_variant(constraint.clone());
+            let edges_res = context
+              .core
+              .rule_graph
+              .find_root_edges(*subject.type_id(), selectors::Selector::Select(selector))
+              .ok_or_else(|| {
+                throw(&format!(
+                  "No rules were available to compute {} for {}",
+                  externs::key_to_str(&constraint.0),
+                  externs::key_to_str(&subject)
+                ))
+              });
+
+            future::result(edges_res)
+              .and_then(move |edges| {
+                Select::new(constraint, subject, Default::default(), &edges)
+                  .run(context.clone())
+                  .map(|dep| future::Loop::Continue(dep))
+              })
+              .to_boxed() as BoxFuture<_, _>
+          }
+          externs::GeneratorResponse::Break(val) => {
+            future::ok(future::Loop::Break(val)).to_boxed() as BoxFuture<_, _>
+          }
+        })
+    }).to_boxed()
+  }
 }
 
 impl Node for Task {
@@ -1116,11 +1158,21 @@ impl Node for Task {
         .collect::<Vec<_>>(),
     );
 
-    let task = self.task.clone();
+    let func = self.task.func.clone();
     deps
       .then(move |deps_result| match deps_result {
-        Ok(deps) => externs::call(&externs::val_for(&task.func.0), &deps),
-        Err(err) => Err(err),
+        Ok(deps) => externs::call(&externs::val_for(&func.0), &deps),
+        Err(failure) => Err(failure),
+      })
+      .then(move |task_result| match task_result {
+        Ok(val) => {
+          if externs::satisfied_by(&context.core.types.generator, &val) {
+            Self::generate(context, val)
+          } else {
+            ok(val)
+          }
+        }
+        Err(failure) => err(failure),
       })
       .to_boxed()
   }

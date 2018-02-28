@@ -32,11 +32,15 @@ def constraint_for(type_or_constraint):
     raise TypeError("Expected a type or constraint: got: {}".format(type_or_constraint))
 
 
+class Get(datatype('Get', ['product', 'subject'])):
+  """TODO: Experimental synchronous generator API."""
+
+
 class Selector(AbstractClass):
-  # The type constraint for the product type for this selector.
 
   @property
   def type_constraint(self):
+    """The type constraint for the product type for this selector."""
     return constraint_for(self.product)
 
   @abstractproperty
