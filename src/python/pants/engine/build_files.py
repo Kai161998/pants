@@ -20,7 +20,7 @@ from pants.engine.fs import FilesContent, PathGlobs, Snapshot
 from pants.engine.mapper import AddressFamily, AddressMap, AddressMapper, ResolveError
 from pants.engine.objects import Locatable, SerializableFactory, Validatable
 from pants.engine.rules import RootRule, SingletonRule, TaskRule, rule
-from pants.engine.selectors import Select, SelectDependencies, SelectProjection
+from pants.engine.selectors import Get, Select, SelectDependencies
 from pants.engine.struct import Struct
 from pants.util.objects import datatype
 
@@ -44,45 +44,27 @@ class BuildDirs(datatype('BuildDirs', ['dependencies'])):
   """A list of Stat objects for directories containing build files."""
 
 
-class BuildFiles(datatype('BuildFiles', ['files_content'])):
-  """The FileContents of BUILD files in some directory"""
-
-
-class BuildFileGlobs(datatype('BuildFilesGlobs', ['path_globs'])):
-  """A wrapper around PathGlobs that are known to match a build file pattern."""
-
-
-@rule(BuildFiles,
-      [SelectProjection(FilesContent, PathGlobs, 'path_globs', BuildFileGlobs)])
-def build_files(files_content):
-  return BuildFiles(files_content)
-
-
-@rule(BuildFileGlobs, [Select(AddressMapper), Select(Dir)])
-def buildfile_path_globs_for_dir(address_mapper, directory):
-  patterns = address_mapper.build_patterns
-  return BuildFileGlobs(PathGlobs.create(directory.path, include=patterns, exclude=()))
-
-
-@rule(AddressFamily, [Select(AddressMapper), Select(Dir), Select(BuildFiles)])
-def parse_address_family(address_mapper, path, build_files):
+@rule(AddressFamily, [Select(AddressMapper), Select(Dir)])
+def parse_address_family(address_mapper, directory):
   """Given the contents of the build files in one directory, return an AddressFamily.
 
   The AddressFamily may be empty, but it will not be None.
   """
-  files_content = build_files.files_content.dependencies
+  path_globs = PathGlobs.create(directory.path, include=address_mapper.build_patterns, exclude=())
+  files_content = yield Get(FilesContent, path_globs)
+
   if not files_content:
-    raise ResolveError('Directory "{}" does not contain build files.'.format(path))
+    raise ResolveError('Directory "{}" does not contain build files.'.format(directory.path))
   address_maps = []
-  paths = (f.path for f in files_content)
+  paths = (f.path for f in files_content.dependencies)
   ignored_paths = set(address_mapper.build_ignore_patterns.match_files(paths))
-  for filecontent_product in files_content:
+  for filecontent_product in files_content.dependencies:
     if filecontent_product.path in ignored_paths:
       continue
     address_maps.append(AddressMap.parse(filecontent_product.path,
                                          filecontent_product.content,
                                          address_mapper.parser))
-  return AddressFamily.create(path.path, address_maps)
+  yield AddressFamily.create(directory.path, address_maps)
 
 
 class UnhydratedStruct(datatype('UnhydratedStruct', ['address', 'struct', 'dependencies'])):
@@ -114,16 +96,15 @@ def _raise_did_you_mean(address_family, name):
                      .format(name, address_family.namespace, possibilities))
 
 
-@rule(UnhydratedStruct,
-      [Select(AddressMapper),
-       SelectProjection(AddressFamily, Dir, 'spec_path', Address),
-       Select(Address)])
-def resolve_unhydrated_struct(address_mapper, address_family, address):
+@rule(UnhydratedStruct, [Select(AddressMapper), Select(Address)])
+def resolve_unhydrated_struct(address_mapper, address):
   """Given an Address and its AddressFamily, resolve an UnhydratedStruct.
 
   Recursively collects any embedded addressables within the Struct, but will not walk into a
   dependencies field, since those are requested explicitly by tasks using SelectDependencies.
   """
+
+  address_family = yield Get(AddressFamily, Dir(address.spec_path))
 
   struct = address_family.addressables.get(address)
   addresses = address_family.addressables
@@ -155,7 +136,7 @@ def resolve_unhydrated_struct(address_mapper, address_family, address):
 
   collect_dependencies(struct)
 
-  return UnhydratedStruct(
+  yield UnhydratedStruct(
     filter(lambda build_address: build_address == address, addresses)[0], struct, dependencies)
 
 
@@ -318,9 +299,6 @@ def _recursive_dirname(f):
   yield ''
 
 
-BuildFilesCollection = Collection.of(BuildFiles)
-
-
 def create_graph_rules(address_mapper, symbol_table):
   """Creates tasks used to parse Structs from BUILD files.
 
@@ -329,9 +307,6 @@ def create_graph_rules(address_mapper, symbol_table):
   """
   symbol_table_constraint = symbol_table.constraint()
   return [
-    TaskRule(BuildFilesCollection,
-             [SelectDependencies(BuildFiles, BuildDirs, field_types=(Dir,))],
-             BuildFilesCollection),
     # A singleton to provide the AddressMapper.
     SingletonRule(AddressMapper, address_mapper),
     # Support for resolving Structs from Addresses.
@@ -345,8 +320,6 @@ def create_graph_rules(address_mapper, symbol_table):
     resolve_unhydrated_struct,
     # BUILD file parsing.
     parse_address_family,
-    build_files,
-    buildfile_path_globs_for_dir,
     # Spec handling: locate directories that contain build files, and request
     # AddressFamilies for each of them.
     addresses_from_address_families,
@@ -355,6 +328,7 @@ def create_graph_rules(address_mapper, symbol_table):
     # Root rules representing parameters that might be provided via root subjects.
     RootRule(Address),
     RootRule(BuildFileAddress),
+    RootRule(Dir),
     RootRule(AscendantAddresses),
     RootRule(DescendantAddresses),
     RootRule(SiblingAddresses),

@@ -22,7 +22,7 @@ from pants.engine.fs import PathGlobs, Snapshot
 from pants.engine.legacy.structs import BundleAdaptor, BundlesField, SourcesField, TargetAdaptor
 from pants.engine.mapper import ResolveError
 from pants.engine.rules import TaskRule, rule
-from pants.engine.selectors import Select, SelectDependencies, SelectProjection, SelectTransitive
+from pants.engine.selectors import Get, Select, SelectDependencies, SelectTransitive
 from pants.source.wrapped_globs import EagerFilesetWithSpec, FilesetRelPathWrapper
 from pants.util.dirutil import fast_relpath
 from pants.util.objects import datatype
@@ -313,15 +313,15 @@ def _eager_fileset_with_spec(spec_path, filespec, snapshot, include_dirs=False):
                               files_hash=snapshot.fingerprint)
 
 
-@rule(HydratedField,
-      [Select(SourcesField),
-       SelectProjection(Snapshot, PathGlobs, 'path_globs', SourcesField)])
-def hydrate_sources(sources_field, snapshot):
+@rule(HydratedField, [Select(SourcesField)])
+def hydrate_sources(sources_field):
   """Given a SourcesField and a Snapshot for its path_globs, create an EagerFilesetWithSpec."""
+
+  snapshot = yield Get(Snapshot, sources_field.path_globs)
   fileset_with_spec = _eager_fileset_with_spec(sources_field.address.spec_path,
                                                sources_field.filespecs,
                                                snapshot)
-  return HydratedField(sources_field.arg, fileset_with_spec)
+  yield HydratedField(sources_field.arg, fileset_with_spec)
 
 
 @rule(HydratedField,
