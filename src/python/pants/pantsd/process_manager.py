@@ -5,6 +5,7 @@
 from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
                         unicode_literals, with_statement)
 
+import functools
 import logging
 import os
 import signal
@@ -401,14 +402,6 @@ class ProcessManager(ProcessMetadataManager):
     if self.pid:
       os.kill(self.pid, kill_sig)
 
-  def _noop_fork_context(self, func):
-    """A "fork context" without any special behaviour.
-
-    A fork context is a context in which it is safe to call `fork`. This is not a contextmanager
-    because that would make interacting with native code more challenging.
-    """
-    return func()
-
   def terminate(self, signal_chain=KILL_CHAIN, kill_wait=KILL_WAIT_SEC, purge=True):
     """Ensure a process is terminated by sending a chain of kill signals (SIGTERM, SIGKILL)."""
     alive = self.is_alive()
@@ -455,8 +448,12 @@ class ProcessManager(ProcessMetadataManager):
     below) due to the fact that the daemons that pants would run are typically personal user
     daemons. Having a disparate umask from pre-vs-post fork causes files written in each phase to
     differ in their permissions without good reason - in this case, we want to inherit the umask.
+
+    :param fork_context: A function which accepts and calls a function that will call fork. This
+      is not a contextmanager/generator because that would make interacting with native code more
+      challenging. If no fork_context is passed, the fork function is called directly.
     """
-    fork_context = fork_context or self._noop_fork_context
+
 
     def double_fork():
       logger.debug('forking %s', self)
@@ -465,28 +462,32 @@ class ProcessManager(ProcessMetadataManager):
         os.setsid()
         second_pid = os.fork()
         if second_pid == 0:
-          return False
+          return False, True
         else:
           if write_pid: self.write_pid(second_pid)
-          return True
+          return True, False
       else:
         # This prevents un-reaped, throw-away parent processes from lingering in the process table.
         os.waitpid(pid, 0)
-      return None
+      return False, False
 
-    # Perform the double fork under the fork_context. Three outcomes are possible after the double
-    # fork: we're either the original process, the double-fork parent, or the double-fork child.
-    # These are represented by parent_or_child being None, True, or False, respectively.
+    fork_func = functools.partial(fork_context, double_fork) if fork_context else double_fork
+
+    # Perform the double fork (optionally under the fork_context). Three outcomes are possible after
+    # the double fork: we're either the original process, the double-fork parent, or the double-fork
+    # child. We assert below that a process is not somehow both the parent and the child.
     self.purge_metadata()
     self.pre_fork(**pre_fork_opts or {})
-    parent_or_child = fork_context(double_fork)
-    if parent_or_child is None:
+    is_parent, is_child = fork_func()
+    if not is_parent and not is_child:
       return
 
     try:
-      if parent_or_child:
+      if is_parent:
+        assert not is_child
         self.post_fork_parent(**post_fork_parent_opts or {})
       else:
+        assert not is_parent
         os.chdir(self._buildroot)
         self.post_fork_child(**post_fork_child_opts or {})
     except Exception:

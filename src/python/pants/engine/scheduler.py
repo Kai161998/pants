@@ -278,6 +278,7 @@ class WrappedNativeScheduler(object):
     return list(self._to_key(subject) for subject in subjects)
 
   def with_fork_context(self, func):
+    """See the rustdocs for `scheduler_fork_context` for more information."""
     res = self._native.lib.scheduler_fork_context(self._scheduler, Function(self._to_key(func)))
     return self._from_py_result(res)
 
